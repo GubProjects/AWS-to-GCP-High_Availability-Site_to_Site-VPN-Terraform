@@ -1,0 +1,395 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+        google = {
+      source  = "hashicorp/google"
+      version = ">= 4.0.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+provider "google" {
+  credentials = file("D:/GKE_Lab/terraform-key.json")
+  project     = var.project_id
+  region      = var.region
+  zone        = var.zone
+}
+
+variable "project_id" {
+  description = "GCP Project ID"
+  type        = string
+  default     = "kubernetes-projects-463301"
+}
+
+variable "region" {
+  description = "GCP Region"
+  type        = string
+  default     = "us-central1"
+}
+
+variable "zone" {
+  description = "GCP Zone"
+  type        = string
+  default     = "us-central1-a"
+}
+
+
+resource "google_compute_address" "ha_vpn_ip1" {
+  name   = "ha-vpn-ip1"
+  region = "us-central1"
+}
+
+resource "google_compute_address" "ha_vpn_ip2" {
+  name   = "ha-vpn-ip2"
+  region = "us-central1"
+}
+
+
+# AWS Network Infrastructure
+resource "aws_vpc" "aws_side" {
+  cidr_block           = "10.230.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name = "aws_main"
+  }
+}
+
+# AWS VPN Setup = VGW
+resource "aws_vpn_gateway" "vpn_gw" {
+  vpc_id          = aws_vpc.aws_side.id
+  amazon_side_asn = 64512
+
+  tags = {
+    Name = "main"
+  }
+}
+
+resource "aws_customer_gateway" "tunnel" {
+  bgp_asn    = 65000
+  ip_address = [
+    for iface in google_compute_ha_vpn_gateway.ha_gateway.vpn_interfaces :
+    iface.ip_address if iface.id == 0
+  ][0]
+  type       = "ipsec.1"
+
+  tags = {
+    Name = "gcp-cgw-t1"
+  }
+}
+
+
+
+resource "aws_customer_gateway" "tunnel2" {
+  bgp_asn    = 65000
+  ip_address = [
+    for iface in google_compute_ha_vpn_gateway.ha_gateway.vpn_interfaces :
+    iface.ip_address if iface.id == 1
+  ][0]
+  type       = "ipsec.1"
+
+  tags = {
+    Name = "gcp-cgw-t2"
+  }
+}
+
+
+resource "aws_vpn_connection" "gcp_interface_1" {
+  vpn_gateway_id       = aws_vpn_gateway.vpn_gw.id
+  customer_gateway_id  = aws_customer_gateway.tunnel.id
+  type                 = "ipsec.1"
+  static_routes_only   = false
+
+  tunnel1_inside_cidr   = "169.254.145.128/30"
+  tunnel1_preshared_key = "MySharedSecret123_ABC" // Placeholder 
+  tunnel1_ike_versions  = ["ikev2"]
+  tunnel1_phase1_encryption_algorithms = ["AES256"]
+  tunnel1_phase1_integrity_algorithms  = ["SHA256"]
+  tunnel1_phase1_dh_group_numbers      = [16]
+  tunnel1_phase2_encryption_algorithms = ["AES256"]
+  tunnel1_phase2_integrity_algorithms  = ["SHA256"]
+  tunnel1_phase2_dh_group_numbers      = [16]
+
+  tunnel2_inside_cidr   = "169.254.145.132/30"
+  tunnel2_preshared_key = "MySharedSecret123_ABC"
+  tunnel2_ike_versions  = ["ikev2"]
+  tunnel2_phase1_encryption_algorithms = ["AES256"]
+  tunnel2_phase1_integrity_algorithms  = ["SHA256"]
+  tunnel2_phase1_dh_group_numbers      = [16]
+  tunnel2_phase2_encryption_algorithms = ["AES256"]
+  tunnel2_phase2_integrity_algorithms  = ["SHA256"]
+  tunnel2_phase2_dh_group_numbers      = [16]
+
+  tags = {
+    Name = "aws-to-gcp-vpn-inf1"
+  }
+}
+
+resource "aws_vpn_connection" "gcp_interface_2" {
+  vpn_gateway_id       = aws_vpn_gateway.vpn_gw.id
+  customer_gateway_id  = aws_customer_gateway.tunnel2.id
+  type                 = "ipsec.1"
+  static_routes_only   = false
+
+  tunnel1_inside_cidr   = "169.254.145.136/30"
+  tunnel1_preshared_key = "MySharedSecret123_ABC" // Placeholder 
+  tunnel1_ike_versions  = ["ikev2"]
+  tunnel1_phase1_encryption_algorithms = ["AES256"]
+  tunnel1_phase1_integrity_algorithms  = ["SHA256"]
+  tunnel1_phase1_dh_group_numbers      = [16]
+  tunnel1_phase2_encryption_algorithms = ["AES256"]
+  tunnel1_phase2_integrity_algorithms  = ["SHA256"]
+  tunnel1_phase2_dh_group_numbers      = [16]
+
+  tunnel2_inside_cidr   = "169.254.145.140/30"
+  tunnel2_preshared_key = "MySharedSecret123_ABC"
+  tunnel2_ike_versions  = ["ikev2"]
+  tunnel2_phase1_encryption_algorithms = ["AES256"]
+  tunnel2_phase1_integrity_algorithms  = ["SHA256"]
+  tunnel2_phase1_dh_group_numbers      = [16]
+  tunnel2_phase2_encryption_algorithms = ["AES256"]
+  tunnel2_phase2_integrity_algorithms  = ["SHA256"]
+  tunnel2_phase2_dh_group_numbers      = [16]
+
+  tags = {
+    Name = "aws-to-gcp-vpn-inf2"
+  }
+}
+
+resource "aws_vpn_gateway_attachment" "main" {
+  vpc_id         = aws_vpc.aws_side.id
+  vpn_gateway_id = aws_vpn_gateway.vpn_gw.id
+}
+
+# GCP side 
+resource "google_compute_network" "vpc_network" {
+  name                    = "gcp-vpc-network"
+  auto_create_subnetworks = false
+}
+
+
+resource "google_compute_ha_vpn_gateway" "ha_gateway" {
+  name    = "ha-vpn-gateway"
+  region  = var.region
+  network = google_compute_network.vpc_network.id
+}
+
+resource "google_compute_external_vpn_gateway" "aws_gateway" {
+  name            = "aws-external-gateway"
+  redundancy_type = "FOUR_IPS_REDUNDANCY"
+
+  interface {
+    id         = 0
+    ip_address = aws_vpn_connection.gcp_interface_1.tunnel1_address
+  }
+
+  interface {
+    id         = 1
+    ip_address = aws_vpn_connection.gcp_interface_1.tunnel2_address
+  }
+
+  interface {
+    id         = 2
+    ip_address = aws_vpn_connection.gcp_interface_2.tunnel1_address
+  }
+
+  interface {
+    id         = 3
+    ip_address = aws_vpn_connection.gcp_interface_2.tunnel2_address   
+  }
+}
+
+resource "google_compute_router" "router" {
+  name    = "vpn-router"
+  region  = var.region
+  network = google_compute_network.vpc_network.id
+  
+
+  bgp {
+    asn               = 65000
+    advertise_mode    = "CUSTOM"
+    advertised_groups = ["ALL_SUBNETS"]
+    advertised_ip_ranges {
+      range = "10.240.0.0/16"
+    }
+  }
+}
+
+
+resource "google_compute_vpn_tunnel" "tunnel0" {
+  name                            = "tunnel0"
+  region                          = var.region
+  vpn_gateway                     = google_compute_ha_vpn_gateway.ha_gateway.id
+  vpn_gateway_interface           = 0
+  peer_external_gateway           = google_compute_external_vpn_gateway.aws_gateway.id
+  peer_external_gateway_interface = 0
+  shared_secret                   = "MySharedSecret123_ABC"  // Placeholder 
+  router                          = google_compute_router.router.name
+  ike_version                     = 2
+
+}
+
+resource "google_compute_vpn_tunnel" "tunnel1" {
+  name                            = "tunnel1"
+  region                          = var.region
+  vpn_gateway                     = google_compute_ha_vpn_gateway.ha_gateway.id
+  vpn_gateway_interface           = 0
+  peer_external_gateway           = google_compute_external_vpn_gateway.aws_gateway.id
+  peer_external_gateway_interface = 1
+  shared_secret                   = "MySharedSecret123_ABC"  // Placeholder 
+  router                          = google_compute_router.router.name
+  ike_version                     = 2
+}
+
+resource "google_compute_vpn_tunnel" "tunnel2" {
+  name                            = "tunnel2"
+  region                          = var.region
+  vpn_gateway                     = google_compute_ha_vpn_gateway.ha_gateway.id
+  vpn_gateway_interface           = 1
+  peer_external_gateway           = google_compute_external_vpn_gateway.aws_gateway.id
+  peer_external_gateway_interface = 2
+  shared_secret                   = "MySharedSecret123_ABC"  // Placeholder 
+  router                          = google_compute_router.router.name
+  ike_version                     = 2
+}
+
+resource "google_compute_vpn_tunnel" "tunnel3" {
+  name                            = "tunnel3"
+  region                          = var.region
+  vpn_gateway                     = google_compute_ha_vpn_gateway.ha_gateway.id
+  vpn_gateway_interface           = 1
+  peer_external_gateway           = google_compute_external_vpn_gateway.aws_gateway.id
+  peer_external_gateway_interface = 3
+  shared_secret                   = "MySharedSecret123_ABC"  // Placeholder 
+  router                          = google_compute_router.router.name
+  ike_version                     = 2
+}
+
+# Fixed Router Interface for Tunnel 0
+resource "google_compute_router_interface" "router_interface_tunnel0" {
+  name       = "router-interface-tunnel0"
+  router     = google_compute_router.router.name
+  region     = var.region
+  ip_range   = "169.254.145.130/30"
+  
+ 
+  vpn_tunnel = google_compute_vpn_tunnel.tunnel0.name
+}
+
+resource "google_compute_router_peer" "router_peer_tunnel0" {
+  name                       = "router-peer-tunnel0"
+  router                     = google_compute_router.router.name
+  region                     = var.region
+  peer_ip_address            = "169.254.145.129" # "169.254.145.129" (AWS side)
+  peer_asn                   = 64512
+  advertised_route_priority  = 100
+  interface                  = google_compute_router_interface.router_interface_tunnel0.name
+}
+
+# Fixed Router Interface for Tunnel 1
+resource "google_compute_router_interface" "router_interface_tunnel1" {
+  name       = "router-interface-tunnel1"
+  router     = google_compute_router.router.name
+  region     = var.region
+  ip_range   = "169.254.145.134/30" 
+  vpn_tunnel = google_compute_vpn_tunnel.tunnel1.name
+}
+
+resource "google_compute_router_peer" "router_peer_tunnel1" {
+  name                       = "router-peer-tunnel1"
+  router                     = google_compute_router.router.name
+  region                     = var.region
+  peer_ip_address            = "169.254.145.133"
+  peer_asn                   = 64512
+  advertised_route_priority  = 100
+  interface                  = google_compute_router_interface.router_interface_tunnel1.name
+}
+
+# Fixed Router Interface for Tunnel 2
+resource "google_compute_router_interface" "router_interface_tunnel2" {
+  name       = "router-interface-tunnel2"
+  router     = google_compute_router.router.name
+  region     = var.region
+  ip_range   = "169.254.145.138/30" 
+  vpn_tunnel = google_compute_vpn_tunnel.tunnel2.name
+}
+
+resource "google_compute_router_peer" "router_peer_tunnel2" {
+  name                       = "router-peer-tunnel2"
+  router                     = google_compute_router.router.name
+  region                     = var.region
+  peer_ip_address            = "169.254.145.137" 
+  peer_asn                   = 64512
+  advertised_route_priority  = 100
+  interface                  = google_compute_router_interface.router_interface_tunnel2.name
+}
+
+# Fixed Router Interface for Tunnel 0
+resource "google_compute_router_interface" "router_interface_tunnel3" {
+  name       = "router-interface-tunnel3"
+  router     = google_compute_router.router.name
+  region     = var.region
+  ip_range   = "169.254.145.142/30" 
+  vpn_tunnel = google_compute_vpn_tunnel.tunnel3.name
+}
+
+resource "google_compute_router_peer" "router_peer_tunnel3" {
+  name                       = "router-peer-tunnel3"
+  router                     = google_compute_router.router.name
+  region                     = var.region
+  peer_ip_address            = "169.254.145.141" 
+  peer_asn                   = 64512
+  advertised_route_priority  = 100
+  interface                  = google_compute_router_interface.router_interface_tunnel3.name
+}
+
+
+resource "google_compute_firewall" "allow_ipsec_from_aws" {
+  name    = "allow-ipsec-from-aws"
+  network = google_compute_network.vpc_network.name
+
+  allow {
+    protocol = "udp"
+    ports    = ["500", "4500"]
+  }
+
+  source_ranges = [
+    aws_vpn_connection.gcp_interface_1.tunnel1_address,
+    aws_vpn_connection.gcp_interface_1.tunnel2_address,
+    aws_vpn_connection.gcp_interface_2.tunnel1_address,
+    aws_vpn_connection.gcp_interface_2.tunnel2_address
+  ]
+
+  direction = "INGRESS"
+  target_tags = ["vpn-access"]
+  priority = 1000
+}
+resource "google_compute_firewall" "allow-vpn-traffic" {
+  name    = "allow-vpn-traffic"
+  network = google_compute_network.vpc_network.name
+
+  allow {
+    protocol = "udp"
+    ports    = ["500", "4500"]
+  }
+
+  allow {
+    protocol = "icmp"
+  }
+
+  allow {
+    protocol = "esp"
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  direction     = "INGRESS"
+  target_tags   = ["vpn-access"]
+}
